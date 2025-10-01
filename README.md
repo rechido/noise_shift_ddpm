@@ -6,6 +6,20 @@ Author: Da Eun Lee, Nakamura Kensuke, Byung-Woo Hong
 
 Paper: https://ieeexplore.ieee.org/abstract/document/11142693
 
+## Usage
+
+1. clone https://github.com/huggingface/diffusers.git to your local
+2. install the diffusers library following its tutorial
+3. check if you can run the unconditional generation example. This code is the baseline of our experiment.
+4. When you make up your environment, clone our github.
+5. goto examples/noise_shift_ddpm/
+6. install the packages in requirements.txt by "python -m pip install -r requirements.txt"
+7. try "bash run_train.sh" to start training. In order to run the training codes, you are required to prepare pre-computed prior_means pt file. 
+8. During training, checkpoint models will be saved.
+9. Using the checkpoints, try "bash run_inference.sh" to generate fake images and save them.
+10. Using the fake images, try "bash run_evaluate.sh" to measure fid, precision, and recall.
+11. Try checking examples/prior_generation folder to prepare prior_means pytorch tensor file for training.
+
 ## Preliminary: Shifted Diffusion
 
 Shifted Diffusion is one of previous works for non-zero mean Gaussian prior distributions $p(x_T)$. 
