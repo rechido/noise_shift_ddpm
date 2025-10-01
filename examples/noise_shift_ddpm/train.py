@@ -492,7 +492,7 @@ def main(args):
     )
 
     def transform_images(examples):
-        images = [augmentations(image.convert("RGB")) for image in examples["image"]]
+        images = [augmentations(image.convert("RGB")) for image in examples["img"]]
         # NEW: Pass the subset label along so that each sample contains its cluster assignment.
         return {"input": images, "label": examples["label"]}
 

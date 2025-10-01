@@ -47,6 +47,7 @@ else:
     _import_structure["scheduling_ddim_inverse"] = ["DDIMInverseScheduler"]
     _import_structure["scheduling_ddim_parallel"] = ["DDIMParallelScheduler"]
     _import_structure["scheduling_ddpm"] = ["DDPMScheduler"]
+    _import_structure["scheduling_ddpm_noise_shift"] = ["DDPMNoiseShiftScheduler"]
     _import_structure["scheduling_ddpm_parallel"] = ["DDPMParallelScheduler"]
     _import_structure["scheduling_ddpm_wuerstchen"] = ["DDPMWuerstchenScheduler"]
     _import_structure["scheduling_deis_multistep"] = ["DEISMultistepScheduler"]
@@ -149,6 +150,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
         from .scheduling_ddim_inverse import DDIMInverseScheduler
         from .scheduling_ddim_parallel import DDIMParallelScheduler
         from .scheduling_ddpm import DDPMScheduler
+        from .scheduling_ddpm_noise_shift import DDPMNoiseShiftScheduler
         from .scheduling_ddpm_parallel import DDPMParallelScheduler
         from .scheduling_ddpm_wuerstchen import DDPMWuerstchenScheduler
         from .scheduling_deis_multistep import DEISMultistepScheduler
