@@ -34,10 +34,50 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../utils')))
 from save_image_util import save_images_grid_np
 
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans
+
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.33.0.dev0")
 
 logger = get_logger(__name__, log_level="INFO")
+
+
+def _balanced_assignment(distances, capacity):
+    """
+    Given a distance matrix (n_samples x k), assign each sample to a cluster
+    so that each cluster receives exactly 'capacity' samples.
+    This greedy algorithm sorts samples by the gap between their first and second
+    best cluster distances (processing the most "confident" assignments first).
+    """
+    n_samples, k = distances.shape
+    assignments = -1 * np.ones(n_samples, dtype=np.int32)
+    cluster_counts = np.zeros(k, dtype=np.int32)
+    sorted_indices = np.argsort(distances, axis=1)
+    gap = distances[np.arange(n_samples), sorted_indices[:, 1]] - distances[np.arange(n_samples), sorted_indices[:, 0]]
+    order = np.argsort(gap)[::-1]
+    for i in order: 
+        for j in sorted_indices[i]:
+            if cluster_counts[j] < capacity:
+                assignments[i] = j
+                cluster_counts[j] += 1
+                break
+    return assignments
+
+def balanced_kmeans_assignment(data, n_clusters):
+    """
+    Performs an initial k-means clustering to obtain centers and then assigns each sample
+    to a cluster using a balanced assignment so that each cluster gets exactly (n_samples / n_clusters)
+    samples. Assumes n_samples is exactly divisible by n_clusters.
+    """
+    n_samples = data.shape[0]
+    capacity = n_samples // n_clusters
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42).fit(data)
+    centers = kmeans.cluster_centers_  # shape: (n_clusters, d)
+    distances = np.linalg.norm(data[:, None] - centers[None, :], axis=2)  # shape: (n_samples, n_clusters)
+    assignments = _balanced_assignment(distances, capacity)
+    return assignments
 
 
 def _extract_into_tensor(arr, timesteps, broadcast_shape):
@@ -173,9 +213,6 @@ def parse_args():
     parser.add_argument(
         "--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler."
     )
-    parser.add_argument(
-        "--num_cycles", type=int, default=500, help="Number of Cycle in the cosine lr scheduler."
-    )
     parser.add_argument("--adam_beta1", type=float, default=0.95, help="The beta1 parameter for the Adam optimizer.")
     parser.add_argument("--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
     parser.add_argument(
@@ -269,11 +306,6 @@ def parse_args():
     parser.add_argument(
         "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers."
     )
-    # New argument to specify prior means for shifted noise
-    parser.add_argument("--num_classes", type=int, default=None,
-                        help="Number of classes to use (select classes 0 to num_classes-1).")
-    parser.add_argument("--samples_per_class", type=int, default=None,
-                        help="Number of samples per class to use.")
     parser.add_argument(
         "--prior_mean_file_name",
         type=str,
@@ -405,24 +437,23 @@ def main(args):
             model.enable_xformers_memory_efficient_attention()
         else:
             raise ValueError("xformers is not available. Make sure it is installed correctly")
-        
-    prior_means = torch.load(args.prior_mean_file_name)
 
-    # Initialize the scheduler: use custom shifted-noise scheduler if prior_means is provided.
+    prior_means = torch.load(args.prior_mean_file_name)
+    num_prior = prior_means.shape[0]
+
     accepts_prediction_type = "prediction_type" in set(inspect.signature(DDPMScheduler.__init__).parameters.keys())
     if accepts_prediction_type:
         noise_scheduler = DDPMScheduler(
             num_train_timesteps=args.ddpm_num_steps,
             beta_schedule=args.ddpm_beta_schedule,
             prediction_type=args.prediction_type,
-            num_prior=prior_means.shape[0]
+            num_prior=num_prior
         )
     else:
         assert(False)
         noise_scheduler = DDPMScheduler(num_train_timesteps=args.ddpm_num_steps, beta_schedule=args.ddpm_beta_schedule)
-        
+
     # pre-compute mean-shift terms for shifted priors.
-    
     nu_ts, mu_ts = noise_scheduler.compute_mu_t(prior_means)
     mean_shift_forward = noise_scheduler.compute_mean_shift_forward(prior_means)
     mean_shift_reverse = noise_scheduler.compute_mean_shift_reverse(prior_means, mu_ts)
@@ -445,36 +476,61 @@ def main(args):
     else:
         dataset = load_dataset("imagefolder", data_dir=args.train_data_dir, cache_dir=args.cache_dir, split="train")
         
-    # NEW: Filtering based on command-line arguments.
-    if args.num_classes is not None and args.samples_per_class is not None:
-        # Case 3: Filter to only classes 0...num_classes-1 and take samples_per_class samples for each.
-        dataset = dataset.filter(lambda x: x["label"] < args.num_classes)
-        indices = []
-        for cls in range(args.num_classes):
-            cls_indices = [i for i, sample in enumerate(dataset) if sample["label"] == cls]
-            if len(cls_indices) < args.samples_per_class:
-                raise ValueError(f"Not enough samples for class {cls}: requested {args.samples_per_class}, found {len(cls_indices)}")
-            indices.extend(cls_indices[:args.samples_per_class])
-        dataset = dataset.select(indices)
-        logger.info(f"Filtered dataset size: {len(dataset)} (classes 0 to {args.num_classes-1} with {args.samples_per_class} samples each)")
-    elif args.num_classes is not None:
-        # Case 1: Only filter classes, use all samples for those classes.
-        dataset = dataset.filter(lambda x: x["label"] < args.num_classes)
-        logger.info(f"Filtered dataset size: {len(dataset)} (only classes 0 to {args.num_classes-1})")
-    elif args.samples_per_class is not None:
-        # Case 2: For all classes, select only samples_per_class samples per class.
-        unique_labels = sorted(list(set(dataset["label"])))
-        indices = []
-        for cls in unique_labels:
-            cls_indices = [i for i, sample in enumerate(dataset) if sample["label"] == cls]
-            if len(cls_indices) < args.samples_per_class:
-                raise ValueError(f"Not enough samples for class {cls}: requested {args.samples_per_class}, found {len(cls_indices)}")
-            indices.extend(cls_indices[:args.samples_per_class])
-        dataset = dataset.select(indices)
-        logger.info(f"Filtered dataset size: {len(dataset)} (using {args.samples_per_class} samples per class for all classes: {unique_labels})")
+    # --- Multi-GPU Safe Balanced Clustering ---
+    from torch import distributed as dist
+    device_feature = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if accelerator.is_main_process:  # Only rank 0 performs clustering
+        print(f"Performing balanced k-means clustering on feature embeddings with k = {num_prior} ...")
+
+        # Load pre-trained ResNet50 for feature extraction
+        import torchvision.models as models
+        feature_extractor = models.resnet50(pretrained=True)
+        feature_extractor.fc = torch.nn.Identity()  # Remove FC layer
+        feature_extractor.to(device_feature)
+        feature_extractor.eval()
+
+        transform_features = transforms.Compose([
+            transforms.Resize(256, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
+        # Extract feature embeddings (only rank 0)
+        images = dataset["img"]
+        features = []
+        for image in tqdm(images, desc="Extracting features"):
+            img = image.convert("RGB")
+            img_tensor = transform_features(img).unsqueeze(0).to(device_feature)
+            with torch.no_grad():
+                feat = feature_extractor(img_tensor)
+            features.append(feat.squeeze(0).cpu().numpy())
+        features = np.array(features)
+
+        # Perform k-means clustering on extracted features
+        assignments = balanced_kmeans_assignment(features, num_prior)
+        cluster_labels = np.array(assignments)
+
     else:
-        # Case 4: Neither provided, use full dataset.
-        logger.info(f"Using full dataset with size: {len(dataset)}")
+        cluster_labels = None  # Other processes do not perform k-means
+
+    # --- Synchronize the pseudo labels across GPUs ---
+    if dist.is_initialized():
+        if accelerator.is_main_process:
+            cluster_labels_tensor = torch.tensor(cluster_labels, dtype=torch.int64, device=accelerator.device)
+        else:
+            cluster_labels_tensor = torch.empty(len(dataset), dtype=torch.int64, device=accelerator.device)
+        dist.broadcast(cluster_labels_tensor, src=0)  # Now broadcasting a GPU tensor
+        cluster_labels = cluster_labels_tensor.cpu().numpy()
+
+    # Attach the pseudo labels to dataset
+    dataset = dataset.add_column("subset_label", cluster_labels)
+    
+    if accelerator.is_main_process:
+        unique, counts = np.unique(cluster_labels, return_counts=True)
+        print("Balanced clustering distribution:")
+        for cluster, count in zip(unique, counts):
+            print(f"Cluster {cluster}: {count} samples")
 
 
     augmentations = transforms.Compose(
@@ -483,14 +539,14 @@ def main(args):
             transforms.CenterCrop(args.resolution) if args.center_crop else transforms.RandomCrop(args.resolution),
             transforms.RandomHorizontalFlip() if args.random_flip else transforms.Lambda(lambda x: x),
             transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
+            transforms.Normalize([0.5,0.5,0.5], [0.5,0.5,0.5]),
         ]
     )
 
     def transform_images(examples):
         images = [augmentations(image.convert("RGB")) for image in examples["img"]]
         # NEW: Pass the subset label along so that each sample contains its cluster assignment.
-        return {"input": images, "label": examples["label"]}
+        return {"input": images, "subset_label": examples["subset_label"]}
 
     logger.info(f"Dataset size: {len(dataset)}")
 
@@ -504,7 +560,6 @@ def main(args):
         optimizer=optimizer,
         num_warmup_steps=args.lr_warmup_steps * args.gradient_accumulation_steps,
         num_training_steps=(len(train_dataloader) * args.num_epochs),
-        num_cycles=args.num_cycles
     )
 
     model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
@@ -515,9 +570,7 @@ def main(args):
         ema_model.to(accelerator.device)
 
     if accelerator.is_main_process:
-        #run = os.path.split(__file__)[-1].split(".")[0]
-        run = os.path.split(args.output_dir)[-1].split(".")[0]
-        print(run)
+        run = os.path.split(__file__)[-1].split(".")[0]
         accelerator.init_trackers(run)
 
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -576,13 +629,13 @@ def main(args):
             ).long()
 
             # Instead of a fixed prior label, use the subset_label assigned via clustering.
-            labels = batch["label"]
-            noisy_images, pred = noise_scheduler.add_noise(clean_images, noise, timesteps, prior_labels=labels, mean_shift_forward=mean_shift_forward)
+            subset_labels = batch["subset_label"]
+            noisy_images, pred = noise_scheduler.add_noise(clean_images, noise, timesteps, prior_labels=subset_labels, mean_shift_forward=mean_shift_forward)
 
             with accelerator.accumulate(model):
-                output = model(noisy_images, timesteps).sample
+                model_output = model(noisy_images, timesteps).sample
 
-                loss = F.mse_loss(output.float(), pred.float())
+                loss = F.mse_loss(model_output.float(), pred.float())
 
                 accelerator.backward(loss)
 
@@ -646,9 +699,6 @@ def main(args):
 
                 generator = torch.Generator(device=pipeline.device).manual_seed(0)
                 
-                # Sample random prior labels for the evaluation batch.
-                # For example, if args.num_prior is 10, this samples integers in [0, 9]
-                # 각 prior_mean마다 args.eval_batch_size개씩 label 생성
                 prior_labels = (
                     torch.arange(prior_means.shape[0], device=pipeline.device)
                     .unsqueeze(1)
@@ -656,7 +706,6 @@ def main(args):
                     .reshape(-1)
                 )
                 
-                # Loop through each prior mean and generate images.
                 images = pipeline(
                     generator=generator,
                     batch_size=prior_labels.shape[0],
@@ -664,6 +713,8 @@ def main(args):
                     output_type="np",
                     prior_labels=prior_labels,
                     prior_means=prior_means,
+                    mean_shift_forward=mean_shift_forward,
+                    mean_shift_reverse=mean_shift_reverse,
                 ).images
                 images_processed = (images * 255).round().astype("uint8")
                 save_path = os.path.join(args.output_dir, f"fake_epoch{epoch}.png")

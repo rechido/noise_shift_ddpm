@@ -265,21 +265,16 @@ class DDPMNoiseShiftScheduler(SchedulerMixin, ConfigMixin):
     
     def compute_mu_t(self, prior_means):
         num_timesteps = self.alphas_cumprod.shape[0]
-        N, D = prior_means.shape # N: prior 개수, D: 임베딩 차원
+        N, D = prior_means.shape
 
-        # nu_t와 mu_t 텐서를 [N, D, num_timesteps] 형태로 초기화
         nu_t = torch.zeros((N, D, num_timesteps), dtype=self.alphas_cumprod.dtype, device=self.alphas_cumprod.device)
         mu_t = torch.zeros((N, D, num_timesteps), dtype=self.alphas_cumprod.dtype, device=self.alphas_cumprod.device)
 
-        # t = 0인 경우 계산
         nu_t[..., 0] = prior_means * torch.sqrt(1 / self.alphas_cumprod[0] - 1)
         mu_t[..., 0] = torch.sqrt(self.alphas_cumprod[0]) * nu_t[..., 0]
 
-        # t >= 1인 경우, 누적된 nu_t를 고려하여 계산
         for t in range(1, num_timesteps):
-            # self.alphas_cumprod[t]는 스칼라이므로 브로드캐스팅을 통해 [N, D]와 곱셈이 이루어짐.
             nu_current = prior_means * torch.sqrt(1 / self.alphas_cumprod[t] - 1)
-            # t 이전의 nu_t를 t차원(마지막 차원)에서 합산하여 [N, D]로 만듦.
             nu_cumsum = nu_t[..., :t].sum(dim=-1)
             nu_t[..., t] = nu_current - nu_cumsum
             mu_t[..., t] = torch.sqrt(self.alphas_cumprod[t]) * nu_t[..., t]
@@ -287,37 +282,30 @@ class DDPMNoiseShiftScheduler(SchedulerMixin, ConfigMixin):
         return nu_t, mu_t
             
     def compute_mean_shift_forward(self, prior_means):
-        # sqrt_one_minus_alpha_prod: [1000]
         sqrt_one_minus_alpha_prod = (1 - self.alphas_cumprod) ** 0.5
-        # reshape하여 [1, 1, 1000]로 변환
         sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.view(1, 1, -1)
-        # self.prior_means를 unsqueeze하여 [10, 3*32*32, 1]로 변환
         prior_means_expanded = prior_means.unsqueeze(-1)
-        # elementwise 곱: [10, 3072, 1] * [1, 1, 1000] = [10, 3072, 1000]
         mean_shifts = prior_means_expanded * sqrt_one_minus_alpha_prod
         
         return mean_shifts
     
     def compute_mean_shift_reverse(self, mu, mu_ts):
         num_timesteps = self.alphas_cumprod.shape[0]
-        N, D = mu.shape  # N: prior 개수, D: 임베딩 차원
-        # 최종 결과를 위한 [N, D, num_timesteps] 형태의 텐서 초기화
+        N, D = mu.shape
         mean_shifts = torch.zeros((N, D, num_timesteps), dtype=self.alphas_cumprod.dtype, device=self.alphas_cumprod.device)
 
         for t in range(num_timesteps):
-            # 각 타임스텝에 대한 mu_ts는 [N, D] 형태임
             mu_t = mu_ts[..., t] # shape: [N, D]
             
-            sqrt_alpha_t = self.alphas[t] ** 0.5 # 스칼라
-            beta_prod_t_prev = self.betas_cumprod[t-1] if t-1 >= 0 else torch.tensor(0.0, dtype=self.alphas.dtype, device=self.alphas.device) # 스칼라
-            beta_prod_t = self.betas_cumprod[t] # 스칼라
-            beta_t = self.betas[t] # 스칼라
-            sqrt_beta_prod_t_prev = beta_prod_t_prev ** 0.5 # 스칼라
+            sqrt_alpha_t = self.alphas[t] ** 0.5
+            beta_prod_t_prev = self.betas_cumprod[t-1] if t-1 >= 0 else torch.tensor(0.0, dtype=self.alphas.dtype, device=self.alphas.device)
+            beta_prod_t = self.betas_cumprod[t]
+            beta_t = self.betas[t]
+            sqrt_beta_prod_t_prev = beta_prod_t_prev ** 0.5
                 
-            coeff_mu_t = sqrt_alpha_t * beta_prod_t_prev / beta_prod_t # 스칼라
-            coeff_mu = sqrt_beta_prod_t_prev * beta_t / beta_prod_t # 스칼라
+            coeff_mu_t = sqrt_alpha_t * beta_prod_t_prev / beta_prod_t
+            coeff_mu = sqrt_beta_prod_t_prev * beta_t / beta_prod_t
                 
-            # elementwise 연산: [N, D] 형태의 mu_t와 mu에 대해 계산 후 저장
             mean_shifts[..., t] = - coeff_mu_t * mu_t + coeff_mu * mu
                     
         return mean_shifts 
@@ -640,7 +628,6 @@ class DDPMNoiseShiftScheduler(SchedulerMixin, ConfigMixin):
         B, C, H, W = noisy_samples.shape
         mean_shift_forward = mean_shift_forward.to(timesteps.device) # [num_class, C*H*W, num_timesteps]
         
-        # 1. prior_labels로 첫 번째 차원 인덱싱: [10, 3072, 1000] -> [B, 3072, 1000]
         if isinstance(prior_labels, int):
             prior_labels = torch.full((B,), prior_labels, dtype=torch.long, device=noisy_samples.device)
         if prior_labels.dim() != 1 or prior_labels.shape[0] != B:
@@ -648,17 +635,11 @@ class DDPMNoiseShiftScheduler(SchedulerMixin, ConfigMixin):
         if (prior_labels < 0).any() or (prior_labels >= self.num_prior).any():
             raise ValueError("Each prior label must be in the range [0, num_prior - 1].")
         
-        # 인덱싱하면 각 배치 샘플마다 해당하는 prior의 mean shift를 선택하여 [B, 3072, 1000]이 됨.
         mean_shifts = mean_shift_forward[prior_labels] # shape: [B, 3072, 1000]
         
-        # 2. timesteps를 이용하여 마지막 차원 인덱싱: [B, 3072, 1000] -> [B, 3072]
-        # timesteps: [B] (각 값은 0~999)
-        # 각 배치 샘플별로 3072개의 요소에 대해 마지막 차원에서 선택하기 위해,
-        # timesteps를 [B, 3072]로 확장하고 torch.gather를 사용합니다.
         indices = timesteps.unsqueeze(1).expand(B, mean_shifts.shape[1]).unsqueeze(2) # shape: [B, 3072, 1]
         mean_shift_t = torch.gather(mean_shifts, dim=2, index=indices).squeeze(2) # shape: [B, 3072]
         
-        # 3. [B, 3072] 텐서를 noisy_samples의 spatial shape에 맞게 reshape
         if C * H * W != mean_shift_t.shape[1]:
             raise ValueError(f"Expected H*W ({H*W}) to equal {mean_shift_t.shape[1]}.")
         # [B, 3072] -> [B, C, H, W]

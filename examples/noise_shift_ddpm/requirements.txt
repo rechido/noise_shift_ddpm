@@ -3,5 +3,7 @@ torchvision
 datasets
 wandb
 torcheval
+torchmetrics
+torch-fidelity
 matplotlib
 scikit-learn
