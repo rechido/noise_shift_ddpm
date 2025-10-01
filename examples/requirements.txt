@@ -1,0 +1,7 @@
+accelerate>=0.16.0
+torchvision
+datasets
+wandb
+torcheval
+matplotlib
+scikit-learn
