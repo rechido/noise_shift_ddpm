@@ -1,231 +1,266 @@
-<!---
-Copyright 2022 - The HuggingFace Team. All rights reserved.
+## Diffusion Models With Implicit Conditions Driven by Latent Shifts
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+This code is based on Hugging Face diffusers library from https://github.com/huggingface/diffusers.git
 
-    http://www.apache.org/licenses/LICENSE-2.0
+Author: Da Eun Lee, Nakamura Kensuke, Byung-Woo Hong
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
--->
+Paper: https://ieeexplore.ieee.org/abstract/document/11142693
+
+## Preliminary: Shifted Diffusion
+
+Shifted Diffusion is one of previous works for non-zero mean Gaussian prior distributions $p(x_T)$. 
+
+One step forward process of the Shifted Diffusion is defined as
+
+$q(z_t|z_{t-1}) = \mathcal{N}(z_t; \sqrt{\alpha_t} z_{t-1} + s_t, \beta_t \Sigma), where \ s_t = (1 - \alpha_t) \mu$
+
+and multi-step forward process is
+
+$q(z_t|z_0) = \mathcal{N}\left(z_t; \sqrt{\overline{\alpha}_t} z_0 + (1 - \sqrt{\overline{\alpha}_t}) \mu, (1 - \overline{\alpha}_t) \Sigma \right)$
+
+Then reverse process can be derived as
+
+$p_{\theta} (z_{t-1}|z_t) = \mathcal{N}(z_{t-1}; \nu_{\theta}, \Lambda),$
+
+where
+
+$\nu_{\theta} = \gamma (z_t - s_t) + \eta ẑ_0 + \tau (1 - \sqrt{\bar{\alpha} _{t-1}}) \mu$, $\Lambda = \tilde{\beta} _t \Sigma$, 
+
+$\gamma = \frac{\sqrt{\alpha_t} \bar{\beta} _{t-1}}{\bar{\beta}_t}$,  $\eta = \frac{\sqrt{\alpha _{t-1}} \beta_t}{\bar{\beta}_t}$, $\tau = \frac{\beta_t}{\bar{\beta}_t}$, $\hat{z}_0 = \frac{1}{\sqrt{\bar{\alpha}_t}} (z_t - \sqrt{\bar{\beta}_t} \epsilon _\theta)$
+
+Finally, the training objective function is given as
+
+$L(\theta) = \mathbb{E}_{t, z_0, \epsilon} \left[ \| \epsilon - \epsilon _{\theta} ( \sqrt{\bar{\alpha}_t} z_0 + \sqrt{1 - \bar{\alpha}_t} \epsilon, t )  \|^2 \right]$
+
+
+where the neural network is trained to predict the standard Gaussian noise.
+
+
+
+## Interpretation of Shifted Diffusion as DDPM with shifted data
+
+Applying reparameterization trick to the forward process of Shifted Diffusion leads to the following equation.
+
+$z_t = \sqrt{\bar{\alpha}_t} z_0 + (1 - \sqrt{\bar{\alpha}_t}) \mu + \sqrt{\bar{\beta}_t} \epsilon$, where $\epsilon \sim \mathcal{N}(0, \mathbf{I})$
+
+This equation can be reformulated as
+
+$z'_t = \sqrt{\bar{\alpha}_t} z'_0 + \sqrt{\bar{\beta}_t} \epsilon$, where $z'_t = z_t - \mu$ and $z'_0 = z_0 - \mu$,
+
+which is effectively equivalent to the forward process of vanilla DDPMs for shifted data.
+
+
+
+## Method: DDPM with shifted noise
+
+Our motivation for formulating the generalized forward process with a non-zero mean Gaussian prior in DDPM is to target the shift in noise rather than data.
+
+The forward process is proposed as
+
+$x_t = \sqrt{\bar{\alpha}_t} x_0 + \sqrt{\bar{\beta}_t} \epsilon$, where $\epsilon \sim \mathcal{N}(\mu, \mathbf{I})$
+
+The proposed method could be more intuitive way incorporating non-zero mean Gaussian priors.
+
+To derive reverse process of the proposed method, we use generalized formulation for the forward process as
+
+$x_t = \sqrt{\bar{\alpha}_t} x_0 +  \epsilon_t$, where $\epsilon_t \sim \mathcal{N}(\mu_t, \bar{\beta}_t \mathbf{I})$, $\mu_0 = 0, \mu_T = \mu$.
+
+Then the one step forward process $q(x_t|x_{t-1})$ can be represented as
+
+$x_t = \sqrt{\alpha_t} x_{t-1} +  \xi_t$, $\xi_t \sim \mathcal{N}(\nu_t, \beta_t \mathbf{I})$, 
+
+where
+
+$v_1 = \mu_1$, $v_t = \mu_t - \sqrt{\bar{\alpha}_t} \sum _{t=1} ^{t-1} \frac{v_i}{\sqrt{\bar{\alpha}_i}}$, ($t>1$)
+
+From this equation and the given $\mu_t = \sqrt{1 - \bar{\alpha}_t} \mu$, we can compute $\nu_t$.
+
+The reverse process of our method can then be written as
+
+$x _{t-1} = \gamma x_t + \eta \hat{x}_0 + \frac{\eta}{\sqrt{\bar{\alpha} _{t-1}}} \mu _{t-1} - \gamma \nu_t + \sqrt{\tilde{\beta}_t} z$,
+
+where
+
+$\gamma = \frac{\sqrt{\alpha_t} \bar{\beta} _{t-1}}{\bar{\beta}_t}$, $\eta = \frac{\sqrt{\alpha _{t-1}} \beta_t}{\bar{\beta}_t}$, $\tilde{\beta}_t = \frac{\bar{\beta} _{t-1}}{\bar{\beta}_t} \beta_t$, $z \sim \mathcal{N}(0, \mathbf{I})$, $\hat{x}_0 = \frac{1}{\sqrt{\bar{\alpha}_t}} (x_t - \mu_t - \sqrt{\bar{\beta}_t} \epsilon _\theta)$.
+
+Finally, the training objective of our method is given as
+
+$L(\theta) = \mathbb{E} _{t, x_0, \epsilon} \left[ \| \frac{1}{\sqrt{\bar{\beta}_t}} ( x_t - \sqrt{\bar{\alpha}_t} x_0 - \mu_t) - \epsilon _\theta (\sqrt{\bar{\alpha}_t} x_0 + \sqrt{\bar{\beta}_t} \epsilon, t) \|^2 \right]$,
+
+where the network $\epsilon _\theta$ learns the target $\epsilon_t - \mu_t$.
+
+
+
+## Derivation of $\nu_t$
+
+Let one-step and multi-step forward process be
+
+$q(x_t|x_{t-1}) = \mathcal{N}(x_t | \sqrt{\alpha_t} x_0 + \nu_t, \beta_t \mathbf{I})$,
+
+$q(x_t|x_0) = \mathcal{N}(x_t | \sqrt{\bar{\alpha}_t} x_0 + \mu_t, \bar{\beta}_t \mathbf{I})$.
+
+Applying the reparameterization trick, the two equations become
+
+$x_t = \sqrt{\alpha_t} x_{t-1} + \xi_t$, where $\xi_t \sim \mathcal{N}(\nu_t, (1 - \alpha_t) \mathbf{I})$,
+
+$x_t = \sqrt{\bar{\alpha}_t} x_0 + \epsilon_t$, where $\epsilon_t \sim \mathcal{N}(\mu_t, (1 - \bar{\alpha}_t) \mathbf{I})$.
+
+From the one-step forward process, we can obtain one-step process for the time step $t-1$.
+
+$x_{t-1} = \sqrt{\alpha_{t-1}} x_{t-2} +  \xi_{t-1}$, where $\xi_{t-1} \sim \mathcal{N}(\nu_{t-1}, (1 - \alpha_{t-1}) \mathbf{I})$
+
+Substituting $x_{t-1}$ into one-step process for the time step $t$ leads to
+
+$x_t = \sqrt{\alpha_t} (\sqrt{\alpha_{t-1}} x_{t-2} +  \xi_{t-1}) + \xi_t$,
+
+$x_t = \sqrt{\alpha_t \alpha_{t-1}} x_{t-2} +  (\sqrt{\alpha_t} \xi_{t-1} + \xi_t)$.
+
+
+Following the same technique of vanilla DDPMs, we merge the two Gaussian noises as
+
+$x_t = \sqrt{\alpha_t \alpha_{t-1}} x_{t-2} + \eta_{t-1}$, where $\eta_{t-1} \sim \mathcal{N}(\sqrt{\alpha_t} \nu_{t-1} + \nu_t, (1 - \alpha_t \alpha_{t-1}) \mathbf{I})$
+
+Similarly, repeating the same calculation upto the time step of $t=1$ results in
+
+$x_t = \sqrt{\alpha_t \cdots \alpha_1} x_0 + (\xi_t + \sqrt{\alpha_t} \xi_{t-1} + \sqrt{\alpha_t \alpha_{t-1}} \xi_{t-2} + \cdots + \sqrt{\alpha_t \cdots \alpha_3} \xi_2 + \sqrt{\alpha_t \cdots \alpha_2} \xi_1)$,
+
+which can be rewritten as
+
+$x_t = \sqrt{\bar{\alpha}_t} x_0 + \epsilon_t$, where $\epsilon _t \sim \mathcal{N} (\nu _t + \sqrt{\alpha _t} \nu _{t-1} + \sqrt{\alpha _t \alpha _{t-1}} \nu _{t-2} + \cdots + \sqrt{\alpha_t \cdots \alpha_3} \nu_2 + \sqrt{\alpha_t \cdots \alpha_2} \nu_1, (1 - \bar{\alpha}_t) \mathbf{I})$
+
+or
+
+$x_t = \sqrt{\bar{\alpha}_t} x_0 + \epsilon_t$, where $\epsilon_t \sim \mathcal{N}(\sqrt{\bar{\alpha} _t} \sum _{i=1} ^t \frac{\nu_i}{\sqrt{\bar{\alpha}_i}}, (1 - \bar{\alpha}_t) \mathbf{I})$
+
+Therefore, we obtain the following result:
+
+$\mu_t = \sqrt{\bar{\alpha} _t} \sum _{i=1}^t \frac{\nu_i}{\sqrt{\bar{\alpha}_i}}$ for $t > 1$
+
+When $t=1$, it is straightforward that $\mu_1 = \nu_1$.
+
+From the above relation, we can compute $\nu_t$ for the all time steps by the following iterative algorithm.
 
 <p align="center">
-    <br>
-    <img src="https://raw.githubusercontent.com/huggingface/diffusers/main/docs/source/en/imgs/diffusers_library.jpg" width="400"/>
-    <br>
-<p>
-<p align="center">
-    <a href="https://github.com/huggingface/diffusers/blob/main/LICENSE"><img alt="GitHub" src="https://img.shields.io/github/license/huggingface/datasets.svg?color=blue"></a>
-    <a href="https://github.com/huggingface/diffusers/releases"><img alt="GitHub release" src="https://img.shields.io/github/release/huggingface/diffusers.svg"></a>
-    <a href="https://pepy.tech/project/diffusers"><img alt="GitHub release" src="https://static.pepy.tech/badge/diffusers/month"></a>
-    <a href="CODE_OF_CONDUCT.md"><img alt="Contributor Covenant" src="https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg"></a>
-    <a href="https://twitter.com/diffuserslib"><img alt="X account" src="https://img.shields.io/twitter/url/https/twitter.com/diffuserslib.svg?style=social&label=Follow%20%40diffuserslib"></a>
+  <img src="resource/algorithm1.png" />
 </p>
 
-🤗 Diffusers is the go-to library for state-of-the-art pretrained diffusion models for generating images, audio, and even 3D structures of molecules. Whether you're looking for a simple inference solution or training your own diffusion models, 🤗 Diffusers is a modular toolbox that supports both. Our library is designed with a focus on [usability over performance](https://huggingface.co/docs/diffusers/conceptual/philosophy#usability-over-performance), [simple over easy](https://huggingface.co/docs/diffusers/conceptual/philosophy#simple-over-easy), and [customizability over abstractions](https://huggingface.co/docs/diffusers/conceptual/philosophy#tweakable-contributorfriendly-over-abstraction).
+ 
 
-🤗 Diffusers offers three core components:
+## Derivation of the reverse process
 
-- State-of-the-art [diffusion pipelines](https://huggingface.co/docs/diffusers/api/pipelines/overview) that can be run in inference with just a few lines of code.
-- Interchangeable noise [schedulers](https://huggingface.co/docs/diffusers/api/schedulers/overview) for different diffusion speeds and output quality.
-- Pretrained [models](https://huggingface.co/docs/diffusers/api/models/overview) that can be used as building blocks, and combined with schedulers, for creating your own end-to-end diffusion systems.
+We construct the reverse process of our model by first deriving the conditional posterior of the forward process $q(x_{t-1} | x_t, x_0)$ by using Bayes' theorem.
 
-## Installation
+$q(x_{t-1}|x_t, x_0) = q(x_t|x_{t-1}, x_0) \frac{q(x_{t-1}|x_0)}{q(x_t|x_0)}$,
 
-We recommend installing 🤗 Diffusers in a virtual environment from PyPI or Conda. For more details about installing [PyTorch](https://pytorch.org/get-started/locally/), please refer to their official documentation.
+where 
 
-### PyTorch
+$q(x_t|x_{t-1}, x_0) = q(x_t|x_{t-1}) = \mathcal{N}(x_t | \sqrt{\alpha_t} x_{t-1} + \nu_t, \beta_t \mathbf{I})$, (by Markov assumption)
 
-With `pip` (official package):
+$q(x _{t-1}|x_0) = \mathcal{N}(x _{t-1} | \sqrt{\bar{\alpha} _{t-1}} x_0 + \mu _{t-1}, \bar{\beta} _{t-1} \mathbf{I})$,
 
-```bash
-pip install --upgrade diffusers[torch]
-```
+$q(x_t|x_0) = \mathcal{N}(x_t | \sqrt{\bar{\alpha}_t} x_0 + \mu_t, \bar{\beta}_t \mathbf{I})$.
 
-With `conda` (maintained by the community):
+Multiplying three normal distributions gives
 
-```sh
-conda install -c conda-forge diffusers
-```
+$q(x_{t-1} \mid x_t, x_0) \propto \exp \bigg( -\frac{1}{2} \left( \frac{x_t - \left(\sqrt{\alpha_t} x _{t-1} + \nu_t\right)}{\sqrt{\beta_t}} \right)^2 - \frac{1}{2} \left( \frac{x _{t-1} - \left(\sqrt{\bar{\alpha} _{t-1}} x_0 + \mu _{t-1}\right)}{\sqrt{\bar{\beta} _{t-1}}} \right)^2 + \frac{1}{2} \left( \frac{x_t - \left(\sqrt{\bar{\alpha}_t} x_0 + \mu_t\right)}{\sqrt{\bar{\beta}_t}} \right)^2  \bigg)$
 
-### Apple Silicon (M1/M2) support
+$q(x_{t-1} \mid x_t, x_0) \propto \exp \bigg( -\frac{1}{2} \left( \left( \frac{x_t - \sqrt{\alpha_t} x_{t-1} - \nu_t}{\sqrt{\beta_t}} \right)^2 + \left( \frac{x _{t-1} - \sqrt{\bar{\alpha} _{t-1}} x_0 - \mu _{t-1}}{\sqrt{\bar{\beta} _{t-1}}} \right)^2 \right) + C \bigg)$
 
-Please refer to the [How to use Stable Diffusion in Apple Silicon](https://huggingface.co/docs/diffusers/optimization/mps) guide.
+We treated every terms unrelated to $x _{t-1}$ as constants. We now rearrage the first two terms,
 
-## Quickstart
+$\frac{(x_t - \sqrt{\alpha_t} x_{t-1} - \nu_t)^2}{\beta_t} = \frac{\alpha_t}{\beta_t} x_{t-1}^2 - 2 \frac{\sqrt{\alpha_t}}{\beta_t} (x_t - \nu_t) x_{t-1} + C$
 
-Generating outputs is super easy with 🤗 Diffusers. To generate an image from text, use the `from_pretrained` method to load any pretrained diffusion model (browse the [Hub](https://huggingface.co/models?library=diffusers&sort=downloads) for 30,000+ checkpoints):
+$\frac{(x _{t-1} - \sqrt{\bar{\alpha} _{t-1}} x_0 - \mu _{t-1})^2}{\bar{\beta} _{t-1}} = \frac{1}{\bar{\beta} _{t-1}} x _{t-1} ^2 - 2 \frac{\sqrt{\bar{\alpha} _{t-1}} x_0 + \mu _{t-1}}{\bar{\beta} _{t-1}} x _{t-1} + C$
 
-```python
-from diffusers import DiffusionPipeline
-import torch
+Then
 
-pipeline = DiffusionPipeline.from_pretrained("stable-diffusion-v1-5/stable-diffusion-v1-5", torch_dtype=torch.float16)
-pipeline.to("cuda")
-pipeline("An image of a squirrel in Picasso style").images[0]
-```
+$q(x_{t-1} \mid x_t, x_0) \propto \exp \bigg( -\frac{1}{2} \left( A_t x _{t-1} ^2 - 2 B_t x _{t-1} + C \right) \bigg)$,
 
-You can also dig into the models and schedulers toolbox to build your own diffusion system:
+where
 
-```python
-from diffusers import DDPMScheduler, UNet2DModel
-from PIL import Image
-import torch
+$A_t = \frac{\alpha_t}{\beta_t} + \frac{1}{\bar{\beta} _{t-1}}$, $B_t = \frac{\sqrt{\alpha_t}}{\beta_t} (x_t - \nu_t) + \frac{\sqrt{\bar{\alpha} _{t-1}} x_0 + \mu _{t-1}}{\bar{\beta} _{t-1}}$.
 
-scheduler = DDPMScheduler.from_pretrained("google/ddpm-cat-256")
-model = UNet2DModel.from_pretrained("google/ddpm-cat-256").to("cuda")
-scheduler.set_timesteps(50)
+$q(x_{t-1} \mid x_t, x_0) \propto \exp \left( -\frac{1}{2} A_t \left(x_{t-1} - \frac{B_t}{A_t}\right)^2 + C \right)$
 
-sample_size = model.config.sample_size
-noise = torch.randn((1, 3, sample_size, sample_size), device="cuda")
-input = noise
+Therefore, we end up with the fact that the conditional posterior is also normal distribution which can be described as
 
-for t in scheduler.timesteps:
-    with torch.no_grad():
-        noisy_residual = model(input, t).sample
-        prev_noisy_sample = scheduler.step(noisy_residual, t, input).prev_sample
-        input = prev_noisy_sample
+$q(x _{t-1} \mid x_t, x_0) \propto \exp \left( -\frac{1}{2} \frac{(x _{t-1} - \tilde{\mu}_t)^2}{\tilde{\beta}_t} \right) = \mathcal{N}(x _{t-1} | \tilde{\mu}_t, \tilde{\beta}_t \mathbf{I})$,
 
-image = (input / 2 + 0.5).clamp(0, 1)
-image = image.cpu().permute(0, 2, 3, 1).numpy()[0]
-image = Image.fromarray((image * 255).round().astype("uint8"))
-image
-```
+where 
 
-Check out the [Quickstart](https://huggingface.co/docs/diffusers/quicktour) to launch your diffusion journey today!
+$\tilde{\mu}_t = \frac{B_t}{A_t}, \quad \tilde{\beta}_t = \frac{1}{A_t}$.
 
-## How to navigate the documentation
+As a next step, we design the reverse process of our model as
 
-| **Documentation**                                                   | **What can I learn?**                                                                                                                                                                           |
-|---------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| [Tutorial](https://huggingface.co/docs/diffusers/tutorials/tutorial_overview)                                                            | A basic crash course for learning how to use the library's most important features like using models and schedulers to build your own diffusion system, and training your own diffusion model.  |
-| [Loading](https://huggingface.co/docs/diffusers/using-diffusers/loading)                                                             | Guides for how to load and configure all the components (pipelines, models, and schedulers) of the library, as well as how to use different schedulers.                                         |
-| [Pipelines for inference](https://huggingface.co/docs/diffusers/using-diffusers/overview_techniques)                                             | Guides for how to use pipelines for different inference tasks, batched generation, controlling generated outputs and randomness, and how to contribute a pipeline to the library.               |
-| [Optimization](https://huggingface.co/docs/diffusers/optimization/fp16)                                                        | Guides for how to optimize your diffusion model to run faster and consume less memory.                                                                                                          |
-| [Training](https://huggingface.co/docs/diffusers/training/overview) | Guides for how to train a diffusion model for different tasks with different training techniques.                                                                                               |
-## Contribution
+$p_{\theta}(x_{t-1} \mid x_t) = \mathcal{N}(x_{t-1} | \tilde{\mu}_{\theta} (x_t, t), \tilde{\beta}_t \mathbf{I})$,
 
-We ❤️  contributions from the open-source community!
-If you want to contribute to this library, please check out our [Contribution guide](https://github.com/huggingface/diffusers/blob/main/CONTRIBUTING.md).
-You can look out for [issues](https://github.com/huggingface/diffusers/issues) you'd like to tackle to contribute to the library.
-- See [Good first issues](https://github.com/huggingface/diffusers/issues?q=is%3Aopen+is%3Aissue+label%3A%22good+first+issue%22) for general opportunities to contribute
-- See [New model/pipeline](https://github.com/huggingface/diffusers/issues?q=is%3Aopen+is%3Aissue+label%3A%22New+pipeline%2Fmodel%22) to contribute exciting new diffusion models / diffusion pipelines
-- See [New scheduler](https://github.com/huggingface/diffusers/issues?q=is%3Aopen+is%3Aissue+label%3A%22New+scheduler%22)
+where
 
-Also, say 👋 in our public Discord channel <a href="https://discord.gg/G7tWnz98XR"><img alt="Join us on Discord" src="https://img.shields.io/discord/823813159592001537?color=5865F2&logo=discord&logoColor=white"></a>. We discuss the hottest trends about diffusion models, help each other with contributions, personal projects or just hang out ☕.
+$\tilde{\mu} _{\theta} = \frac{B _{\theta}}{A_t}$, $\tilde{\beta}_t = \frac{1}{A_t}$, $B _{\theta} = \frac{\sqrt{\alpha_t}}{\beta_t} (x_t - \nu_t) + \frac{\sqrt{\bar{\alpha} _{t-1}} \hat{x}_0 + \mu _{t-1}}{\bar{\beta} _{t-1}}$, $\hat{x}_0 = \frac{1}{\sqrt{\bar{\alpha}_t}} (x_t - \mu_t - \sqrt{\bar{\beta}_t} \epsilon _\theta)$,
+
+which simplifies the denoising matching loss $\mathbb{E} _{x_t \sim q(x_t | x_0)} [D _{KL} (q(x _{t-1} | x_t, x_0) \parallel p _\theta (x _{t-1} | x_t))]$.
+
+Now we obtain the update equation of the reverse process by applying reparameterization trick.
+
+$x _{t-1} = \mu _\theta(x_t, t) + \sqrt{\tilde{\beta}_t} z, \ z \sim \mathcal{N}(0, \mathbf{I})$,
+
+$x _{t-1} = \frac{B _{\theta}}{A_t} + \sqrt{\frac{1}{A_t}} z$,
+
+$x _{t-1} = \frac{\frac{\sqrt{\alpha_t}}{\beta_t} (x_t - \nu_t) + \frac{\sqrt{\bar{\alpha} _{t-1}} \hat{x} _0 + \mu _{t-1}}{\bar{\beta} _{t-1}}}{\frac{\alpha_t}{\beta_t} 
+    + \frac{1}{\bar{\beta} _{t-1}}} + \sqrt{\frac{1}{\frac{\alpha_t}{\beta_t} + \frac{1}{\bar{\beta} _{t-1}}}} z$,
+
+$x _{t-1} = \frac{\frac{\sqrt{\alpha_t}}{\beta_t}}{\frac{\alpha_t}{\beta_t} + \frac{1}{\bar{\beta} _{t-1}}} x_t 
+    + \frac{\frac{\sqrt{\bar{\alpha} _{t-1}}}{\bar{\beta} _{t-1}}}{\frac{\alpha_t}{\beta_t} + \frac{1}{\bar{\beta} _{t-1}}} \hat{x} _0 
+    + (\frac{\frac{\mu _{t-1}}{\bar{\beta} _{t-1}} - \frac{\sqrt{\alpha_t}}{\beta_t} \nu_t}{\frac{\alpha_t}{\beta_t} + \frac{1}{\bar{\beta} _{t-1}}}) 
+    + \sqrt{\frac{1}{\frac{\alpha_t}{\beta_t} + \frac{1}{\bar{\beta} _{t-1}}}} z$,
+
+$x _{t-1} = \frac{\sqrt{\alpha_t} \bar{\beta} _{t-1}}{\bar{\beta}_t} x_t 
+    + \frac{\sqrt{\bar{\alpha} _{t-1}} \beta_t}{\bar{\beta}_t} \hat{x} _0 
+    + \frac{\beta_t}{\bar{\beta}_t} \mu _{t-1}
+    + \frac{\bar{\beta} _{t-1} \sqrt{\alpha_t}}{\bar{\beta}_t} \nu_t
+    + \sqrt{\frac{\bar{\beta} _{t-1}}{\bar{\beta}_t} \beta_t} z$,
+
+or
+
+$x _{t-1} = \gamma x_t + \eta \hat{x} _0 + \frac{\eta}{\sqrt{\bar{\alpha} _{t-1}}} \mu _{t-1} - \gamma \nu_t + \sqrt{\tilde{\beta}_t} z$,
+
+where
+
+$\gamma = \frac{\sqrt{\alpha_t} \bar{\beta} _{t-1}}{\bar{\beta}_t}$, $\eta = \frac{\sqrt{\alpha _{t-1}} \beta_t}{\bar{\beta}_t}$, $\tilde{\beta}_t = \frac{\bar{\beta} _{t-1}}{\bar{\beta}_t} \beta_t$, $z \sim \mathcal{N}(0, \mathbf{I})$, $\hat{x} _0 = \frac{1}{\sqrt{\bar{\alpha}_t}} (x_t - \mu_t - \sqrt{\bar{\beta}_t} \epsilon _\theta)$.
 
 
-## Popular Tasks & Pipelines
 
-<table>
-  <tr>
-    <th>Task</th>
-    <th>Pipeline</th>
-    <th>🤗 Hub</th>
-  </tr>
-  <tr style="border-top: 2px solid black">
-    <td>Unconditional Image Generation</td>
-    <td><a href="https://huggingface.co/docs/diffusers/api/pipelines/ddpm"> DDPM </a></td>
-    <td><a href="https://huggingface.co/google/ddpm-ema-church-256"> google/ddpm-ema-church-256 </a></td>
-  </tr>
-  <tr style="border-top: 2px solid black">
-    <td>Text-to-Image</td>
-    <td><a href="https://huggingface.co/docs/diffusers/api/pipelines/stable_diffusion/text2img">Stable Diffusion Text-to-Image</a></td>
-      <td><a href="https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5"> stable-diffusion-v1-5/stable-diffusion-v1-5 </a></td>
-  </tr>
-  <tr>
-    <td>Text-to-Image</td>
-    <td><a href="https://huggingface.co/docs/diffusers/api/pipelines/unclip">unCLIP</a></td>
-      <td><a href="https://huggingface.co/kakaobrain/karlo-v1-alpha"> kakaobrain/karlo-v1-alpha </a></td>
-  </tr>
-  <tr>
-    <td>Text-to-Image</td>
-    <td><a href="https://huggingface.co/docs/diffusers/api/pipelines/deepfloyd_if">DeepFloyd IF</a></td>
-      <td><a href="https://huggingface.co/DeepFloyd/IF-I-XL-v1.0"> DeepFloyd/IF-I-XL-v1.0 </a></td>
-  </tr>
-  <tr>
-    <td>Text-to-Image</td>
-    <td><a href="https://huggingface.co/docs/diffusers/api/pipelines/kandinsky">Kandinsky</a></td>
-      <td><a href="https://huggingface.co/kandinsky-community/kandinsky-2-2-decoder"> kandinsky-community/kandinsky-2-2-decoder </a></td>
-  </tr>
-  <tr style="border-top: 2px solid black">
-    <td>Text-guided Image-to-Image</td>
-    <td><a href="https://huggingface.co/docs/diffusers/api/pipelines/controlnet">ControlNet</a></td>
-      <td><a href="https://huggingface.co/lllyasviel/sd-controlnet-canny"> lllyasviel/sd-controlnet-canny </a></td>
-  </tr>
-  <tr>
-    <td>Text-guided Image-to-Image</td>
-    <td><a href="https://huggingface.co/docs/diffusers/api/pipelines/pix2pix">InstructPix2Pix</a></td>
-      <td><a href="https://huggingface.co/timbrooks/instruct-pix2pix"> timbrooks/instruct-pix2pix </a></td>
-  </tr>
-  <tr>
-    <td>Text-guided Image-to-Image</td>
-    <td><a href="https://huggingface.co/docs/diffusers/api/pipelines/stable_diffusion/img2img">Stable Diffusion Image-to-Image</a></td>
-      <td><a href="https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5"> stable-diffusion-v1-5/stable-diffusion-v1-5 </a></td>
-  </tr>
-  <tr style="border-top: 2px solid black">
-    <td>Text-guided Image Inpainting</td>
-    <td><a href="https://huggingface.co/docs/diffusers/api/pipelines/stable_diffusion/inpaint">Stable Diffusion Inpainting</a></td>
-      <td><a href="https://huggingface.co/runwayml/stable-diffusion-inpainting"> runwayml/stable-diffusion-inpainting </a></td>
-  </tr>
-  <tr style="border-top: 2px solid black">
-    <td>Image Variation</td>
-    <td><a href="https://huggingface.co/docs/diffusers/api/pipelines/stable_diffusion/image_variation">Stable Diffusion Image Variation</a></td>
-      <td><a href="https://huggingface.co/lambdalabs/sd-image-variations-diffusers"> lambdalabs/sd-image-variations-diffusers </a></td>
-  </tr>
-  <tr style="border-top: 2px solid black">
-    <td>Super Resolution</td>
-    <td><a href="https://huggingface.co/docs/diffusers/api/pipelines/stable_diffusion/upscale">Stable Diffusion Upscale</a></td>
-      <td><a href="https://huggingface.co/stabilityai/stable-diffusion-x4-upscaler"> stabilityai/stable-diffusion-x4-upscaler </a></td>
-  </tr>
-  <tr>
-    <td>Super Resolution</td>
-    <td><a href="https://huggingface.co/docs/diffusers/api/pipelines/stable_diffusion/latent_upscale">Stable Diffusion Latent Upscale</a></td>
-      <td><a href="https://huggingface.co/stabilityai/sd-x2-latent-upscaler"> stabilityai/sd-x2-latent-upscaler </a></td>
-  </tr>
-</table>
+# Derivation of the training objective function
 
-## Popular libraries using 🧨 Diffusers
+We start from the denoising matching loss $\mathbb{E} _{x_t \sim q(x_t | x_0)} [D _{KL} (q(x _{t-1} | x_t, x_0) \parallel p _\theta (x _{t-1} | x_t))]$. Because both $q(x _{t-1} | x_t, x_0)$ and $p _\theta (x _{t-1} | x_t)$ are normal distributions and from the KL divergence formula of two multivariate Gaussian distribution, the denoising matching loss can be simplified as follows:
 
-- https://github.com/microsoft/TaskMatrix
-- https://github.com/invoke-ai/InvokeAI
-- https://github.com/InstantID/InstantID
-- https://github.com/apple/ml-stable-diffusion
-- https://github.com/Sanster/lama-cleaner
-- https://github.com/IDEA-Research/Grounded-Segment-Anything
-- https://github.com/ashawkey/stable-dreamfusion
-- https://github.com/deep-floyd/IF
-- https://github.com/bentoml/BentoML
-- https://github.com/bmaltais/kohya_ss
-- +14,000 other amazing GitHub repositories 💪
+$L _{simple} \propto \mathbb{E} _{x_t \sim q(x_t | x_0)} \left[ \| \tilde{\mu}_t(x_t, x_0) - \mu _\theta (x_t, t) \|^2 \right]$,
 
-Thank you for using us ❤️.
+$L _{simple} \propto \mathbb{E}_q \left[ \| \frac{B_t}{A_t} - \frac{B _{\theta}}{A_t} \|^2 \right]$,
 
-## Credits
+$L _{simple} \propto \mathbb{E}_q \left[ \| B_t - B _{\theta} \|^2 \right]$,
 
-This library concretizes previous work by many different authors and would not have been possible without their great research and implementations. We'd like to thank, in particular, the following implementations which have helped us in our development and without which the API could not have been as polished today:
+$L _{simple} \propto \mathbb{E}_q \left[ \| \frac{\sqrt{\alpha_t}}{\beta_t} (x_t - \nu_t) + \frac{\sqrt{\bar{\alpha} _{t-1}} x_0 + \mu _{t-1}}{\bar{\beta} _{t-1}} - (\frac{\sqrt{\alpha_t}}{\beta_t} (x_t - \nu_t) + \frac{\sqrt{\bar{\alpha} _{t-1}} \hat{x} _0 + \mu _{t-1}}{\bar{\beta} _{t-1}}) \|^2 \right]$,
 
-- @CompVis' latent diffusion models library, available [here](https://github.com/CompVis/latent-diffusion)
-- @hojonathanho original DDPM implementation, available [here](https://github.com/hojonathanho/diffusion) as well as the extremely useful translation into PyTorch by @pesser, available [here](https://github.com/pesser/pytorch_diffusion)
-- @ermongroup's DDIM implementation, available [here](https://github.com/ermongroup/ddim)
-- @yang-song's Score-VE and Score-VP implementations, available [here](https://github.com/yang-song/score_sde_pytorch)
+$L _{simple} \propto \mathbb{E}_q \left[ \| x_0 - \hat{x} _0 \|^2 \right]$,
 
-We also want to thank @heejkoo for the very helpful overview of papers, code and resources on diffusion models, available [here](https://github.com/heejkoo/Awesome-Diffusion-Models) as well as @crowsonkb and @rromb for useful discussions and insights.
+$L _{simple} \propto \mathbb{E}_q \left[ \| x_0 - \frac{1}{\sqrt{\bar{\alpha}_t}} (x_t - \mu_t - \sqrt{\bar{\beta}_t} \epsilon _\theta) \|^2 \right]$,
 
-## Citation
+$L _{simple} \propto \mathbb{E}_q \left[ \| \frac{1}{\sqrt{\bar{\beta}_t}} ( x_t - \sqrt{\bar{\alpha}_t} x_0 - \mu_t) - \epsilon _\theta \|^2 \right]$,
 
-```bibtex
-@misc{von-platen-etal-2022-diffusers,
-  author = {Patrick von Platen and Suraj Patil and Anton Lozhkov and Pedro Cuenca and Nathan Lambert and Kashif Rasul and Mishig Davaadorj and Dhruv Nair and Sayak Paul and William Berman and Yiyi Xu and Steven Liu and Thomas Wolf},
-  title = {Diffusers: State-of-the-art diffusion models},
-  year = {2022},
-  publisher = {GitHub},
-  journal = {GitHub repository},
-  howpublished = {\url{https://github.com/huggingface/diffusers}}
-}
-```
+which is the same form as we proposed before.
+            
+ 
+## References
+
+PRDC codes are cited by the paper "https://proceedings.mlr.press/v119/naeem20a/naeem20a.pdf"
+
+Related Works
+
+DDPM: "https://proceedings.neurips.cc/paper/2020/file/4c5bcfec8584af0d967f1ab10179ca4b-Paper.pdf"
+
+PriorGrad: "https://arxiv.org/pdf/2106.06406"
+
+Shifted Diffusion: "https://openaccess.thecvf.com/content/CVPR2023/papers/Zhou_Shifted_Diffusion_for_Text-to-Image_Generation_CVPR_2023_paper.pdf"
+
+ShiftDDPMs: "https://ojs.aaai.org/index.php/AAAI/article/download/25465/25237"
